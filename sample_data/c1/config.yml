@@ -1,0 +1,5 @@
+data: client.csv
+target_value: BirthRate
+sep: ','
+max_iter: 3
+output: output.csv
