@@ -23,7 +23,7 @@ class InitialState(AppState):
         self.register_transition(COMPUTE_STATE) 
 
     def run(self):
-        self.log('Reading configuration file...')
+        print('-------------------------Reading configuration file--------------------')
         config = bios.read(f'{INPUT_DIR}/config.yml')
         max_iterations = config['max_iter']
         input_file = config['train']
@@ -42,17 +42,21 @@ class InitialState(AppState):
         self.store('input_sep', input_sep)
         self.store('output_file', output_file)
         self.store('total_weight', total_weight)
-        self.store('exact', exact)
+        self.store('exact',exact)
 
         self.log('Reading training data...')
         df = pd.read_csv(f'{INPUT_DIR}/{input_file}', sep = input_sep)
         self.store('dataframe', df)
 
-        self.log('Preparing initial model...')
-        lr = LinearRegression().fit(np.zeros(np.shape(df.drop(columns=target_column))), 
-                                    np.zeros(np.shape(df[target_column])))
+        print('----------------------Preparing initial model--------------------------')
+        if target_column is None:
+            lr = LinearRegression().fit(np.zeros(np.shape(df.iloc[:,:-1])), 
+                                    np.zeros(np.shape(df.iloc[:,-1])))
+        else:
+            lr = LinearRegression().fit(np.zeros
+                                        (np.shape(df.drop(columns=target_column)))
+                                        ,np.zeros(np.shape(df[target_column])))
         self.store('model', lr)
-
         self.store('iteration', 0)
 
         if self.is_coordinator:
@@ -90,31 +94,39 @@ class ComputeState(AppState):
         self.log('Fitting model...')
         
         df = self.load('dataframe')
-        target_column = self.load('target_column')
-        model.fit(df.drop(columns=target_column), df[target_column])
-        self.store('model', model)
 
-        self.log('Scoring model...')
-        score = model.score(df.drop(columns=target_column), df[target_column])
-        
-        self.log(f'Score is: {score}') 
-        self.log(f'Coefficients: {model.coef_}') 
-        self.log(f'Intercept: {model.intercept_}') 
+        target_column = self.load('target_column')
+        scores = []
+        if target_column is None:
+            model.fit(df.iloc[:,:-1], df.iloc[:,-1])
+            score = model.score(df.iloc[:, :-1], df.iloc[:, -1])
+        else:
+            model.fit(df.drop(columns=target_column), df[target_column])
+            score = model.score(df.drop(columns=target_column), df[target_column])
+
+        scores.append(score)
+        self.store('model', model)
+        print('----------------------Done woth Local computation----------------------')
 
         exact = self.load('exact')
         if exact:
-            local_weight = df[target_column].shape[0] # weight of each client
+            if target_column is None:
+                local_weight = df.iloc[:,-1].shape[0] # weight of each client
+            else:
+                local_weight = df[target_column].shape[0] # weight of each client
         else:
             delta = random.uniform(-0.1, 0.1)
-            local_weight = df[target_column].shape[0] + df[target_column].shape[0]*delta
+            if target_column is None:
+                local_weight = df.iloc[:,-1].shape[0] + df.iloc[:,-1].shape[0]*delta
+            else:
+                local_weight = df[target_column].shape[0] + df[target_column].shape[0]*delta
 
         weighted_coef = [coef * (local_weight) for coef in model.coef_]
         weighted_intercept = model.intercept_ * (local_weight)
-        #self.log(f'Coefficients: {weighted_coef}') 
-        #self.log(f'Intercept: {weighted_intercept}') 
 
         self.send_data_to_coordinator(np.hstack([weighted_coef, weighted_intercept, local_weight]))
-
+        print('--------------------local betas sent for aggregation------------------')
+        
         if self.is_coordinator:
             return AGGREGATE_STATE
         else:
@@ -130,19 +142,20 @@ class AggregateState(AppState):
     def run(self):
         self.log('Waiting for local models...')
         param = self.aggregate_data()
-        self.log('Aggregating model...')
+        # print("param", param)
+        print('-----------------------Aggregating model...---------------------')
         total_weight = (param[-1])
-        agg_coef = (param[0:-3]) / total_weight
+        agg_coef = (param[0:-2]) / total_weight
         self.store('agg_coef', agg_coef)
         agg_intercept = (param[-2]) / total_weight
         self.store('agg_intercept', agg_intercept) 
 
-        self.log(f'aggregated coefficients: {agg_coef}, \
-                 \naggregated intercept: {agg_intercept}')
+        # self.log(f'aggregated coefficients: {agg_coef}, \
+        #          \naggregated intercept: {agg_intercept}')
 
         done = self.load('iteration') >= self.load('max_iterations')
 
-        self.log('Broadcasting gloabel model...')
+        print('---------------------Broadcasting gloabel model...--------------------')
         self.broadcast_data([agg_coef, agg_intercept, done])
 
         return COMPUTE_STATE  
@@ -157,25 +170,38 @@ class WriteState(AppState):
         self.log('Writing data to file...')
         model = self.load('model')
         input_test = self.load('input_test')
+        input_train = self.load('input_file')  # train is named as input_file
         input_sep = self.load('input_sep')
         target_column = self.load('target_column')
-        output_file = self.load('output_file')
 
         test_df = pd.read_csv(f'{INPUT_DIR}/{input_test}', sep=input_sep)
         self.store('dataframe', test_df)
 
+        train_df = pd.read_csv(f'{INPUT_DIR}/{input_train}', sep=input_sep)
+        self.store('dataframe', train_df)
+
         if target_column in test_df.columns:
-            #column_one = np.ones((test_df.shape[0], 1)).astype(np.uint8)
             X_test = test_df.drop(columns=[target_column])
-            #X_test = np.concatenate((column_one, X_test), axis=1)
+            Y_test = test_df[target_column] 
         else:
-            self.log(f'Target column "{target_column}" not found in the test data.')
+            X_test = test_df.iloc[:,:-1]
+            Y_test = test_df.iloc[:,-1]
 
-        #print(X_test)
+        if target_column in train_df.columns:
+            X_train = train_df.drop(columns=[target_column])
+            Y_train = train_df[target_column] 
+        else:
+            X_train = train_df.iloc[:,:-1]
+            Y_train = train_df.iloc[:,-1]
 
-        pd.DataFrame(data={'coef': [model.coef_], 'intercept': [model.intercept_],
-                        'pred': [model.predict(X_test)]}) \
-            .to_csv(f'{OUTPUT_DIR}/{output_file}', index=False)
-
+        #print evaluation
+        y_pred = model.predict(X_test)
+        print("Train Accuracy:", model.score(X_train,Y_train), "Test Accuracy:", model.score(X_test,Y_test))
+        print ("test r_sq:", 1 - np.sum( (np.array(Y_test)- np.array(y_pred))**2 )/np.sum ((np.array(Y_test)-np.mean(np.array(Y_test)))**2 ))
+        print ("test RMSE:", ( np.sum((np.array(Y_test)- np.array(y_pred))**2) / np.array(Y_test).shape[0])**0.5 )
+        print ("test NRMSE:", ( (np.sum((np.array(Y_test)- np.array(y_pred))**2) / np.array(Y_test).shape[0])**0.5)/np.mean(np.array(Y_test)) )
+        print ("coef: ", model.coef_, "intercept: ", model.intercept_)
+                
+        print ("----------------------Finished------------------")
         return TERMINAL_STATE
 
